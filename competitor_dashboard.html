@@ -454,7 +454,7 @@ tbody td { padding: 12px 16px; vertical-align: top; }
 
 <script>
 const SHEET_CSV = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTaj8UQib8VAlGduSJY7ahm2uD7qVmqPpf1hJigt_Dfmn2EuieZ85V8lH-wIpJN6r3GWIG6Zj5Zq-Da/pub?gid=0&single=true&output=csv';
-const CSV_URL = 'https://corsproxy.io/?' + encodeURIComponent(SHEET_CSV);
+const CSV_URL = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(SHEET_CSV);
 
 const STOPWORDS = new Set(['the','and','for','with','your','this','that','from','our','you','are','have','not','but','can','all','they','will','its','was','has','been','their','more','what','out','get','just','now','into','how','also','every','after','than','even','like','when','who','skin','hair','treatment','clinic','care','book','today','call','available','contact','dm','at','to','a','of','in','is','it','we','be','on','an','by','or','do','if','so','as','up','no','my','me','us']);
 
@@ -470,56 +470,91 @@ let filtered = [];
 let sortState = { col: 'likes', asc: false };
 
 function parseCSV(text) {
-  const lines = text.split('\n');
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g,'').trim());
+  // Robust CSV tokeniser — handles quoted fields with embedded commas/newlines
+  const tokens = tokeniseCSV(text);
+  if (tokens.length < 2) return [];
+
+  const headers = tokens[0];
   const col = {};
-  headers.forEach((h,i) => col[h] = i);
+  headers.forEach((h,i) => { col[h.trim()] = i; });
+
+  // Debug: log which key columns we found
+  const keyFields = ['ownerUsername','ownerFullName','caption','likesCount','timestamp','url','type','videoViewCount','commentsCount','error'];
+  const found = keyFields.filter(f => col[f] !== undefined);
+  console.log('Columns found:', found.join(', '));
+  console.log('Total columns:', headers.length, '| Total rows:', tokens.length - 1);
 
   const posts = [];
-  for (let i = 1; i < lines.length; i++) {
-    const vals = smartSplit(lines[i]);
-    if (!vals || vals.length < 3) continue;
-    const get = k => col[k] !== undefined ? (vals[col[k]] || '').replace(/^"|"$/g,'').trim() : '';
+  for (let i = 1; i < tokens.length; i++) {
+    const vals = tokens[i];
+    const get = k => {
+      if (col[k] === undefined) return '';
+      const v = vals[col[k]];
+      return v !== undefined ? v.trim() : '';
+    };
+
     const username = get('ownerUsername');
     if (!username || username === 'ownerUsername') continue;
+
     const err = get('error');
     if (err === 'no_items') continue;
+
     const tsRaw = get('timestamp');
+    if (!tsRaw) continue;
     const postDate = new Date(tsRaw);
     if (isNaN(postDate.getTime())) continue;
-    const likes = parseInt(get('likesCount')) || 0;
+
+    const likes = parseInt(get('likesCount'));
     const typeRaw = (get('type') || '').toLowerCase();
     const isReel = typeRaw === 'video' || typeRaw === 'clips' || typeRaw.includes('reel');
+
     posts.push({
-      account: get('ownerFullName') || username,
-      username: username,
-      caption: get('caption') || '',
-      likes: likes,
-      comments: parseInt(get('commentsCount')) || 0,
+      account:      get('ownerFullName') || username,
+      username:     username,
+      caption:      get('caption') || '',
+      likes:        isNaN(likes) ? 0 : likes,
+      comments:     parseInt(get('commentsCount')) || 0,
       firstComment: get('firstComment') || '',
-      timestamp: postDate,
-      url: get('url') || '',
-      type: isReel ? 'reel' : 'post',
-      views: parseInt(get('videoViewCount')) || 0,
-      displayUrl: get('displayUrl') || ''
+      timestamp:    postDate,
+      url:          get('url') || '',
+      type:         isReel ? 'reel' : 'post',
+      views:        parseInt(get('videoViewCount')) || 0,
+      displayUrl:   get('displayUrl') || ''
     });
   }
+  console.log('Posts parsed:', posts.length);
   return posts;
 }
 
-function smartSplit(line) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') { inQuotes = !inQuotes; }
-    else if (ch === ',' && !inQuotes) { result.push(current); current = ''; }
-    else { current += ch; }
+function tokeniseCSV(text) {
+  // Handles \r\n and \n, quoted fields with commas, quotes, newlines inside
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQ = false;
+  // normalise line endings
+  const s = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQ) {
+      if (c === '"') {
+        if (s[i+1] === '"') { field += '"'; i++; } // escaped quote
+        else { inQ = false; }
+      } else {
+        field += c;
+      }
+    } else {
+      if (c === '"') { inQ = true; }
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') {
+        row.push(field); field = '';
+        if (row.some(f => f !== '')) rows.push(row);
+        row = [];
+      } else { field += c; }
+    }
   }
-  result.push(current);
-  return result;
+  if (field || row.length) { row.push(field); if (row.some(f=>f!=='')) rows.push(row); }
+  return rows;
 }
 
 async function loadData() {
